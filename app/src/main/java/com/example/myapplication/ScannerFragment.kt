@@ -1,35 +1,47 @@
 package com.example.myapplication
 
-import android.R.attr.bitmap
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.app.AlertDialog
 import android.content.Context
 import android.content.DialogInterface
+import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.Color
+import android.graphics.ImageFormat
+import android.graphics.PixelFormat
 import android.hardware.*
-import android.os.Build
-import android.os.Bundle
+import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
+import android.media.ImageReader
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.*
 import android.provider.Settings
+import android.text.format.DateFormat
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.*
+import androidx.core.content.ContextCompat.getSystemService
+import androidx.core.content.ContextCompat.startForegroundService
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModelProvider
 import com.example.android.camerax.video.model_class.CameraMetaData
 import com.example.android.camerax.video.repositories.MLModelListener
 import com.example.android.camerax.video.repositories.MyViewModelFactory
-import com.example.myapplication.Utils.addBlurInImage
 import com.example.myapplication.Utils.bitMapToFile
 import com.example.myapplication.Utils.calculateAngleSC
+import com.example.myapplication.Utils.circleArea
 import com.example.myapplication.Utils.cropCircle
 import com.example.myapplication.Utils.drawSquare
 import com.example.myapplication.Utils.dynamicModelRun
 import com.example.myapplication.Utils.qrCodeResultFromZxing
 import com.example.myapplication.Utils.rotateImage
 import com.example.myapplication.Utils.runModel
+import com.example.myapplication.Utils.showBitmapInAlertDialog
+import com.example.myapplication.Utils.takeScreenshotOfView
+import com.example.myapplication.Utils.toBitmap
 import com.example.myapplication.databinding.FragmentScannerBinding
 import com.example.myapplication.model_class.MLResponse
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -42,11 +54,8 @@ import com.journeyapps.barcodescanner.DecoratedBarcodeView
 import com.journeyapps.barcodescanner.DefaultDecoderFactory
 import com.journeyapps.barcodescanner.camera.CameraParametersCallback
 import com.tbruyelle.rxpermissions2.RxPermissions
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import java.io.FileNotFoundException
 import java.lang.Math.abs
-import java.util.*
 
 
 class ScannerFragment : Fragment(), SensorEventListener, MLModelListener {
@@ -69,6 +78,15 @@ class ScannerFragment : Fragment(), SensorEventListener, MLModelListener {
     private var radioAlert: AlertDialog? = null
     private var simpleAlert: AlertDialog? = null
 
+    private val REQUEST_CODE_SCREEN_CAPTURE = 1
+
+    private lateinit var mediaProjectionManager: MediaProjectionManager
+    private lateinit var mediaProjection: MediaProjection
+    private lateinit var virtualDisplay: VirtualDisplay
+    private lateinit var imageReader: ImageReader
+    private val SCREEN_WIDTH = 720
+    private val SCREEN_HEIGHT = 1280
+
     companion object {
         fun newInstance() =
             ScannerFragment()
@@ -77,8 +95,16 @@ class ScannerFragment : Fragment(), SensorEventListener, MLModelListener {
 
     private val callbackCamera: CameraParametersCallback =
         CameraParametersCallback { parameters ->
+            val savedZoomLevel = StorageUtils(requireContext()).userMetaData.zoom_level
             parameters?.maxZoom?.let { getZoomRatio(it) }
-            parameters?.zoom = zoomRatio?.toInt()!!
+
+            if (savedZoomLevel != null) {
+                parameters?.zoom = savedZoomLevel.toInt()
+            } else {
+                if (zoomRatio != null) {
+                    parameters?.zoom = zoomRatio?.toInt()!!
+                }
+            }
             parameters!!
         }
 
@@ -136,7 +162,27 @@ class ScannerFragment : Fragment(), SensorEventListener, MLModelListener {
                 )
 
                 if (originalBitmap != null) {
-                    getResultIfQRCodeIsNotXerox(originalBitmap, result)
+                    try {
+                        requestScreenCapture()
+//                        val screenShot = takeScreenshot()
+                        val polygon =
+                            originalBitmap.let { qrCodeResultFromZxing(it)?.resultPoints }
+
+
+                        if (polygon != null) {
+                            val area = circleArea(polygon)
+                            Log.d(Utils.TAG, "circleArea : $area")
+                            if (area>=50000){
+                                getResultIfQRCodeIsNotXerox(originalBitmap, result,polygon)
+                                binding.zoomQrText.text=""
+                            }else{
+                                binding.zoomQrText.text="Please bring your phone closer to QR Code"
+                            }
+
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
 
                     image_count--
                     Log.e(TAG, "decode result.resultPoints  ${result.resultPoints.size}")
@@ -173,10 +219,55 @@ class ScannerFragment : Fragment(), SensorEventListener, MLModelListener {
         }
 
     }
+    private fun takeScreenshot(): Bitmap? {
+        var screenBitmap:Bitmap?=null
+        try {
+            val v1: View = requireActivity().window.decorView.rootView
+            v1.isDrawingCacheEnabled = true
+            val bitmap = Bitmap.createBitmap(v1.drawingCache)
+            v1.isDrawingCacheEnabled = false
+            screenBitmap=bitmap
+        } catch (e: Throwable) {
+            // Several error may come out with file handling or DOM
+            e.printStackTrace()
+        }
+        return screenBitmap
+    }
+
+    private fun requestScreenCapture() {
+        val serviceIntent = Intent(requireContext(), MyForegroundService::class.java)
+        startForegroundService(requireContext(),serviceIntent)
+        Handler(Looper.getMainLooper()).postDelayed({
+            mediaProjectionManager = requireActivity().getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            startActivityForResult(mediaProjectionManager.createScreenCaptureIntent(), REQUEST_CODE_SCREEN_CAPTURE)
+        }, 1000)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == REQUEST_CODE_SCREEN_CAPTURE && resultCode == Activity.RESULT_OK) {
+            mediaProjection = mediaProjectionManager.getMediaProjection(resultCode, data!!)
+            startScreenCapture()
+        }
+    }
+    private fun startScreenCapture() {
+        imageReader = ImageReader.newInstance(SCREEN_WIDTH, SCREEN_HEIGHT, ImageFormat.JPEG, 1)
+        virtualDisplay = mediaProjection.createVirtualDisplay("ScreenCapture",
+            SCREEN_WIDTH, SCREEN_HEIGHT, resources.displayMetrics.densityDpi,
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+            imageReader.surface, null, null)
+        imageReader.setOnImageAvailableListener({ reader ->
+            // Handle the captured image
+            val image = reader.acquireLatestImage()
+            val screenShot = image.toBitmap()
+            showBitmapInAlertDialog(requireContext(),screenShot)
+            image.close()
+        }, null)
+    }
 
     private fun getResultIfQRCodeIsNotXerox(
         originalBitmap: Bitmap,
-        result: BarcodeResult
+        result: BarcodeResult,
+        polygon: Array< ResultPoint>?
     ) {
 //                                    withContext(Dispatchers.Main) {
 //
@@ -189,11 +280,11 @@ class ScannerFragment : Fragment(), SensorEventListener, MLModelListener {
 //                                    return
 
 
-        val polygon =
-            originalBitmap.let { qrCodeResultFromZxing(it)?.resultPoints }
+
 
 
         val croppedImg = polygon?.let { cropCircle(originalBitmap, it) }
+
 //                        val fourthCoordinate = findFourthPoint(
 //                            polygon[0].x,
 //                            polygon[0].y,
@@ -289,20 +380,7 @@ class ScannerFragment : Fragment(), SensorEventListener, MLModelListener {
         }
     }
 
-    private fun showBitmapInAlertDialog(bitmap: Bitmap?) {
-        val imageView = ImageView(context)
-        imageView.setImageBitmap(bitmap)
-        val builder = AlertDialog.Builder(context)
-        builder.setTitle("Select an option")
-        builder.setView(imageView)
-        builder.setCancelable(false)
-        builder.setPositiveButton("OK") { dialog, which ->
 
-
-        }
-        val dialog = builder.create()
-        dialog.show()
-    }
 
     //todo: request the camera & other permissions before starting functions
     override fun onCreateView(

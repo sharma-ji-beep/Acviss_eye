@@ -6,18 +6,23 @@ import android.content.Context
 import android.content.DialogInterface
 import android.database.Cursor
 import android.graphics.*
+import android.media.Image
 import android.net.Uri
-import android.os.Build
-import android.os.Environment
+import android.os.*
 import android.provider.MediaStore
 import android.renderscript.Allocation
 import android.renderscript.Element
 import android.renderscript.RenderScript
 import android.renderscript.ScriptIntrinsicBlur
 import android.util.Log
+import android.view.PixelCopy
+import android.view.SurfaceView
+import android.view.View
+import android.widget.ImageView
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.Toast
+import androidx.annotation.RequiresApi
 import com.example.myapplication.ml.Black
 import com.google.zxing.*
 import com.google.zxing.common.HybridBinarizer
@@ -29,6 +34,7 @@ import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import kotlin.math.atan2
 import kotlin.math.sqrt
+
 
 object Utils {
     val TAG: String = Utils::class.java.simpleName
@@ -126,16 +132,12 @@ object Utils {
 
     fun cropCircle(bitmap: Bitmap, polygon: Array<ResultPoint>): Bitmap? {
 
-        val centerX = (polygon[0].x + polygon[2].x) / 2
-        val centerY = (polygon[0].y + polygon[2].y) / 2
+        val centerX = getCenterX(polygon)
+        val centerY = getCenterY(polygon)
 
-        val width = sqrt(
-            (polygon[0].x - centerX).times((polygon[0].x - centerX)) +
-                    (polygon[0].y - centerY).times((polygon[0].y - centerY))
-        )
-        val radius = ((487F.div(277F)) * width)
+        val width = getWidthFromPolygon(polygon, centerX, centerY)
+        val radius = getRadiusFromWidth(width)
 
-        Log.d(TAG, "circleArea : ${circleArea(radius)}")
 
         val output = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(output)
@@ -167,16 +169,18 @@ object Utils {
 
     }
 
+    private fun getRadiusFromWidth(width: Float): Float {
+        val radius = ((487F.div(277F)) * width)
+        return radius
+    }
+
     fun drawSquare(bitmap: Bitmap, polygon: Array<ResultPoint>): Bitmap {
         val bitmapWidth = bitmap.width
         val bitmapHeight = bitmap.height
         val newBitmap = Bitmap.createBitmap(bitmapWidth, bitmapHeight, Bitmap.Config.ARGB_8888)
-        val centerX = (polygon[0].x + polygon[2].x) / 2
-        val centerY = (polygon[0].y + polygon[2].y) / 2
-        val width = sqrt(
-            (polygon[0].x - centerX).times((polygon[0].x - centerX)) +
-                    (polygon[0].y - centerY).times((polygon[0].y - centerY))
-        )
+        val centerX = getCenterX(polygon)
+        val centerY = getCenterY(polygon)
+        val width = getWidthFromPolygon(polygon, centerX, centerY)
 //        val sideLength = ((1F.div(2F)) * width) + width
         val sideLength = width.times(2)
         Log.d(TAG, "sideLength :$sideLength : $width")
@@ -198,6 +202,21 @@ object Utils {
         )
         return newBitmap
     }
+
+    private fun getWidthFromPolygon(
+        polygon: Array<ResultPoint>,
+        centerX: Float,
+        centerY: Float
+    ) = sqrt(
+        (polygon[0].x - centerX).times((polygon[0].x - centerX)) +
+                (polygon[0].y - centerY).times((polygon[0].y - centerY))
+    )
+
+    private fun getCenterY(polygon: Array<ResultPoint>) =
+        (polygon[0].y + polygon[2].y) / 2
+
+    private fun getCenterX(polygon: Array<ResultPoint>) =
+        (polygon[0].x + polygon[2].x) / 2
 
     fun drawSquareWithFourCoordinates(
         bitmap: Bitmap,
@@ -316,13 +335,18 @@ object Utils {
 
     }
 
-    fun bitMapToFile(bitmap: Bitmap,qr_code_type:String ,albumName: String,context: Context): File? {
+    fun bitMapToFile(
+        bitmap: Bitmap,
+        qr_code_type: String,
+        albumName: String,
+        context: Context
+    ): File? {
         val filename = "$qr_code_type${System.currentTimeMillis()}.jpg"
         val write: (OutputStream) -> Boolean = {
             bitmap.compress(Bitmap.CompressFormat.JPEG, 100, it)
         }
 
-        if(Build.VERSION.SDK_INT>=Build.VERSION_CODES.Q){
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val contentValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
                 put(MediaStore.MediaColumns.MIME_TYPE, "image/jpg")
@@ -351,9 +375,7 @@ object Utils {
             }
 
             return file
-        } else{
-
-
+        } else {
 
 
             val imagesDir =
@@ -411,7 +433,13 @@ object Utils {
         return bwImage
     }
 
-    private fun circleArea(radius: Float): Double {
+    fun circleArea(polygon: Array<ResultPoint>): Double {
+        val centerX = getCenterX(polygon)
+        val centerY = getCenterY(polygon)
+
+        val width = getWidthFromPolygon(polygon, centerX, centerY)
+        val radius = getRadiusFromWidth(width)
+
         return Math.PI * radius * radius
     }
 
@@ -463,12 +491,68 @@ object Utils {
 
     }
 
-    fun dynamicModelRun(context: Context, bitmap: Bitmap, count: Int): Int?{
-        return if (count == 0){
+    fun dynamicModelRun(context: Context, bitmap: Bitmap, count: Int): Int? {
+        return if (count == 0) {
             val modelValue = runModel(context, bitmap)?.get(0)
             Log.d(TAG, "dynamicModelRun $modelValue")
             modelValue
         } else count
+    }
+
+    fun takeScreenshotOfView(view: View): Bitmap {
+        val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val bgDrawable = view.background
+        if (bgDrawable != null) {
+            bgDrawable.draw(canvas)
+        } else {
+            canvas.drawColor(Color.WHITE)
+        }
+        view.draw(canvas)
+        return bitmap
+    }
+
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun usePixelCopy(videoView: SurfaceView, callback: (Bitmap?) -> Unit) {
+        val bitmap: Bitmap = Bitmap.createBitmap(
+            videoView.width,
+            videoView.height,
+            Bitmap.Config.ARGB_8888
+        );
+        try {
+            // Create a handler thread to offload the processing of the image.
+            val handlerThread = HandlerThread("PixelCopier");
+            handlerThread.start();
+            PixelCopy.request(
+                videoView, bitmap,
+                { copyResult ->
+                    if (copyResult == PixelCopy.SUCCESS) {
+                        callback(bitmap)
+                    }
+                    handlerThread.quitSafely();
+                },
+                Handler(handlerThread.looper)
+            )
+        } catch (e: IllegalArgumentException) {
+            callback(null)
+            // PixelCopy may throw IllegalArgumentException, make sure to handle it
+            e.printStackTrace()
+        }
+    }
+
+    fun showBitmapInAlertDialog(context: Context, bitmap: Bitmap?) {
+        val imageView = ImageView(context)
+        imageView.setImageBitmap(bitmap)
+        val builder = AlertDialog.Builder(context)
+        builder.setTitle("Select an option")
+        builder.setView(imageView)
+        builder.setCancelable(false)
+        builder.setPositiveButton("OK") { dialog, which ->
+
+
+        }
+        val dialog = builder.create()
+        dialog.show()
     }
 
     fun showAlert(s: String, context: Context) {
@@ -522,5 +606,13 @@ object Utils {
 
     fun showToast(s: String, context: Context) {
         Toast.makeText(context, s, Toast.LENGTH_LONG).show()
+    }
+
+
+    fun Image.toBitmap(): Bitmap {
+        val buffer: ByteBuffer = this.planes[0].buffer
+        val bytes = ByteArray(buffer.capacity())
+        buffer[bytes]
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, null)
     }
 }
